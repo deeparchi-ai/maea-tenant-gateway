@@ -1,0 +1,61 @@
+# Tenant Configuration
+#
+# Place this at: ~/.dify/maea/tenants.yaml
+# Mount in docker-compose: ./config/tenants.yaml:/etc/maea/tenants.yaml
+
+upstream:
+  dify_api: "http://dify-api:5001"
+  default_rate_limit_per_minute: 100
+
+tenants:
+  # ── Finance Department ──
+  finance:
+    name: "Finance"
+    workspace_id: "ws_finance_001"
+    sso:
+      provider: "azure_ad"
+      tenant_id: "contoso.com"
+      oidc_issuer: "https://login.microsoftonline.com/contoso.com/v2.0"
+      group_role_mapping:
+        "finance-admins": "admin"
+        "finance-analysts": "editor"
+    isolation:
+      dataset_filter: "tenant=finance"
+      app_visibility: "workspace_only"
+      data_retention_days: 365
+    rate_limits:
+      max_tokens_per_day: 5000000
+      max_api_calls_per_minute: 100
+      max_concurrent_sessions: 50
+
+  # ── Customer Support ──
+  customer_support:
+    name: "Customer Support"
+    workspace_id: "ws_support_002"
+    sso:
+      provider: "okta"
+      domain: "support.example.com"
+      oidc_issuer: "https://support.okta.com/oauth2/default"
+    isolation:
+      dataset_filter: "tenant=support"
+      app_visibility: "workspace_only"
+      data_retention_days: 90
+    rate_limits:
+      max_tokens_per_day: 10000000
+      max_api_calls_per_minute: 200
+      max_concurrent_sessions: 100
+
+  # ── Research Lab (Sandbox) ──
+  research_lab:
+    name: "Research Lab"
+    workspace_id: "ws_research_003"
+    sso:
+      provider: "none"
+    isolation:
+      dataset_filter: "tenant=research"
+      app_visibility: "workspace_only"
+      allowed_tools: ["*_read", "*_search", "calculator", "python_repl"]
+    rate_limits:
+      max_tokens_per_day: 2000000
+      max_api_calls_per_minute: 50
+      max_concurrent_sessions: 10
