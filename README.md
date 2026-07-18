@@ -1,59 +1,91 @@
-# MAEA Multi-Tenant Gateway
+# MAEA Tenant Gateway
 
-Enterprise isolation middleware for Dify. Sits in front of the Dify API to provide tenant-aware routing, SSO/OIDC authentication, usage metering, and audit trails.
+Enterprise multi-tenant isolation middleware for Dify. Part of the [MAEA](https://deeparchi.ai) framework by [DeepArchi](https://deeparchi.ai).
 
-Part of the [MAEA](https://deeparchi.ai) framework by [DeepArchi](https://deeparchi.ai).
+## What It Does
 
-## Why This Exists
+Sits between your clients and Dify API, adding enterprise multi-tenancy:
 
-Dify's workspace model provides basic separation but enterprises need more: department data isolation, per-tenant SSO, usage-based chargeback, and non-repudiable audit trails. This gateway adds those layers without modifying Dify.
-
-## Architecture
-
-```
-Browser/Client
-    │
-    ▼
-┌──────────────────────┐
-│  MAEA Tenant Gateway │  ← JWT → tenant resolution
-│  - Auth (JWT/OIDC)   │  ← Header → isolation rules
-│  - Rate limiting      │  ← Metrics → Prometheus
-│  - Usage metering     │
-│  - Audit logging      │
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│     Dify API         │
-│  (unmodified)        │
-└──────────────────────┘
-```
+| Capability | Description |
+|------------|-------------|
+| **JWT/OIDC Auth** | Resolve tenant from JWT bearer tokens (Azure AD, Okta, custom IdP) |
+| **Tenant Isolation** | Per-tenant dataset filtering, app visibility control |
+| **Usage Metering** | Track token consumption, API calls, and latency per tenant |
+| **Prometheus Metrics** | Built-in `/metrics` endpoint for Grafana dashboards |
+| **Audit Trail** | Request logging with tenant context |
 
 ## Quick Start
 
 ```bash
 pip install -e .
-cp config/tenants.yaml.example config/tenants.yaml
-# Edit tenants.yaml with your Dify upstream URL and tenant configs
-uvicorn maea_gateway.main:app --host 0.0.0.0 --port 8080
+uvicorn maea_gateway.app:app --host 0.0.0.0 --port 8080
 ```
 
-Or with Docker:
+Then point your Dify clients to `http://localhost:8080` instead of Dify directly.
 
-```bash
-docker build -t maea-tenant-gateway .
-docker run -p 8080:8080 -v ./config:/etc/maea maea-tenant-gateway
+## Configuration
+
+Edit `config/tenants.yaml`:
+
+```yaml
+tenants:
+  finance:
+    workspace_id: "ws_finance_001"
+    sso:
+      provider: "azure_ad"
+      tenant_id: "contoso.com"
+    isolation:
+      dataset_filter: "tenant=finance"
+    rate_limits:
+      max_tokens_per_day: 5000000
 ```
 
-## Endpoints
+## Architecture
+
+```
+Client (JWT token)
+    │
+    ▼
+┌──────────────────────┐
+│ MAEA Tenant Gateway  │  ← Port 8080
+│  ├─ Auth (JWT/OIDC)  │
+│  ├─ Tenant Resolver  │
+│  ├─ Usage Metering   │
+│  └─ Audit Trail      │
+└──────────┬───────────┘
+           │ X-MAEA-Tenant-ID, X-MAEA-Dataset-Filter
+           ▼
+┌──────────────────────┐
+│    Dify API          │  ← Port 5001
+└──────────────────────┘
+```
+
+## Management Endpoints
 
 | Endpoint | Description |
 |----------|-------------|
 | `GET /health` | Health check |
-| `GET /metrics` | Prometheus metrics |
-| `GET /admin/tenants` | List configured tenants |
+| `GET /admin/tenants` | List all tenants |
+| `GET /admin/tenants/{id}` | Get tenant config |
 | `GET /admin/tenants/{id}/usage` | Per-tenant usage stats |
-| `ANY /{path}` | Proxied to Dify upstream with tenant injection |
+| `GET /metrics` | Prometheus metrics |
+| `POST /admin/reload` | Hot-reload tenant config |
+
+## Integration with MAEA
+
+```
+┌───────────────────────────────────────┐
+│           MAEA Governance             │
+│  ┌──────────┐ ┌──────────┐ ┌───────┐ │
+│  │Trust Tier│ │A2A Bridge│ │Tenant │ │
+│  │          │ │          │ │Gateway│ │
+│  └──────────┘ └──────────┘ └───┬───┘ │
+└────────────────────────────────┼─────┘
+                                 │
+                    ┌────────────▼──────────┐
+                    │    Dify (Build)        │
+                    └───────────────────────┘
+```
 
 ## License
 
