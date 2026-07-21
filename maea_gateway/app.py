@@ -24,6 +24,9 @@ from prometheus_client import Counter, Histogram, generate_latest
 
 from maea_gateway.audit import audit_log
 from maea_gateway.rate_limiter import limiter
+from maea_gateway.dify_agent_proxy import DifyAgentProxy
+
+agent_proxy = DifyAgentProxy()
 
 app = FastAPI(
     title="MAEA Tenant Gateway",
@@ -110,7 +113,7 @@ async def tenant_middleware(request: Request, call_next):
     return response
 
 
-# ── Dify API Proxy ───────────────────────────────────────
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def proxy_to_dify(request: Request, path: str):
     """Proxy requests to Dify API with tenant isolation, rate limiting, and audit."""
@@ -120,6 +123,60 @@ async def proxy_to_dify(request: Request, path: str):
     user = getattr(request.state, "user", "")
     client_ip = request.client.host if request.client else ""
 
+    # ── Dify-Agent proxy path ──────────────────────────
+    if path.startswith("dify-agent/"):
+        agent_ctx = agent_proxy.extract_agent_context(request)
+        body = await request.body()
+        allowed, reason = limiter.check(tenant_id, tenant_config,
+                                         estimated_tokens=1000)
+        if not allowed:
+            return JSONResponse(status_code=429, content={"detail": reason})
+
+        t1 = time.time()
+        upstream_path = path[len("dify-agent/"):]
+        agent_url = f"{DIFY_UPSTREAM.rstrip('/')}/{upstream_path}"
+        agent_headers = dict(request.headers)
+        for h in ("host", "transfer-encoding"):
+            agent_headers.pop(h, None)
+        if agent_ctx["traceparent"]:
+            agent_headers["traceparent"] = agent_ctx["traceparent"]
+
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            try:
+                agent_resp = await client.request(
+                    method=request.method, url=agent_url,
+                    headers=agent_headers, content=body,
+                )
+                agent_status = agent_resp.status_code
+                agent_response = Response(
+                    content=agent_resp.content,
+                    status_code=agent_status,
+                    headers=dict(agent_resp.headers),
+                )
+                agent_response.headers.pop("transfer-encoding", None)
+                if "application/json" in agent_resp.headers.get(
+                        "content-type", ""):
+                    try:
+                        resp_json = agent_resp.json()
+                        agent_proxy.record_tool_call(
+                            agent_ctx, resp_json, tenant_id,
+                            (time.time() - t1) * 1000,
+                        )
+                    except Exception:
+                        pass
+                return agent_response
+            except httpx.ConnectError:
+                return JSONResponse(
+                    status_code=502,
+                    content={"detail": f"Plugin daemon unreachable: {agent_url}"},
+                )
+            except httpx.TimeoutException:
+                return JSONResponse(
+                    status_code=504,
+                    content={"detail": f"Plugin daemon timeout: {agent_url}"},
+                )
+
+    # ── Dify API Proxy ─────────────────────────────────
     # ── Rate limiting ──────────────────────────────────
     allowed, reason = limiter.check(tenant_id, tenant_config)
     if not allowed:
