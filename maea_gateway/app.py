@@ -22,6 +22,9 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Histogram, generate_latest
 
+from maea_gateway.audit import audit_log
+from maea_gateway.rate_limiter import limiter
+
 app = FastAPI(
     title="MAEA Tenant Gateway",
     version="0.1.0",
@@ -110,9 +113,22 @@ async def tenant_middleware(request: Request, call_next):
 # ── Dify API Proxy ───────────────────────────────────────
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def proxy_to_dify(request: Request, path: str):
-    """Proxy requests to Dify API with tenant isolation."""
+    """Proxy requests to Dify API with tenant isolation, rate limiting, and audit."""
+    t0 = time.time()
     tenant_id = getattr(request.state, "tenant_id", "default")
     tenant_config = getattr(request.state, "tenant_config", {})
+    user = getattr(request.state, "user", "")
+    client_ip = request.client.host if request.client else ""
+
+    # ── Rate limiting ──────────────────────────────────
+    allowed, reason = limiter.check(tenant_id, tenant_config)
+    if not allowed:
+        audit_log(tenant_id=tenant_id, user=user, method=request.method,
+                  path=path, status_code=429, latency_ms=0,
+                  client_ip=client_ip, rate_limited=True,
+                  upstream=DIFY_UPSTREAM,
+                  user_agent=request.headers.get("user-agent", ""))
+        return JSONResponse(status_code=429, content={"detail": reason})
 
     url = f"{DIFY_UPSTREAM.rstrip('/')}/{path}"
     headers = dict(request.headers)
@@ -151,10 +167,20 @@ async def proxy_to_dify(request: Request, path: str):
                                           usage.get("model_name", "unknown"))
                 except Exception:
                     pass
+            status = upstream_resp.status_code
             response = Response(content=upstream_resp.content,
-                                status_code=upstream_resp.status_code,
+                                status_code=status,
                                 headers=dict(upstream_resp.headers))
             response.headers.pop("transfer-encoding", None)
+
+            # ── Audit log ───────────────────────────
+            audit_log(tenant_id=tenant_id, user=user,
+                      method=request.method, path=path,
+                      status_code=status,
+                      latency_ms=(time.time() - t0) * 1000,
+                      client_ip=client_ip,
+                      upstream=DIFY_UPSTREAM,
+                      user_agent=request.headers.get("user-agent", ""))
             return response
         except httpx.ConnectError:
             return JSONResponse(status_code=502, content={"detail": f"Dify unreachable: {url}"})
